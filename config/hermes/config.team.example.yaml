@@ -1,0 +1,77 @@
+# Hermes config.yaml template for a TEAM using Discord.
+# Merge into data/hermes/config.yaml (created by `./stack.sh hermes setup`).
+# Discord IDs: enable Developer Mode, right-click -> Copy ID.
+# Keys follow the Hermes docs (messaging/discord, configuration); re-check them after upgrades.
+
+# Model: always through OmniRoute with its own "hermes" key (set the quota in OmniRoute)
+model:
+  provider: custom
+  model: <model or combo name in OmniRoute>
+  base_url: http://omniroute:20128/v1
+  api_key: "<'hermes' API key created in OmniRoute>"
+
+# Web search and extra tools (MCP servers) are not set in this file: the setup wizard and `hermes mcp add` do it, see DEPLOY.md D6.
+
+# Dashboard: admin only, behind cloudflared
+dashboard:
+  public_url: "https://hermes.DOMAIN"
+  trusted_proxies:
+    - "172.30.0.2"            # fixed cloudflared IP
+
+# One transcript per person, even in the same channel
+group_sessions_per_user: true   # default; false = whole channel shares one session (avoid)
+max_concurrent_sessions: 4      # 2 cores: stop one person from taking the whole agent
+
+# Unknown DMs: "pair" = issue a code, admin approves with
+#   ./stack.sh hermes pairing approve discord <CODE>
+# "decline" = polite refusal, "ignore" = silence. Use "decline" if access is granted by role only.
+unauthorized_dm_behavior: pair
+
+# Notes:
+# - Discord and Telegram run side by side. Allowlists are per platform: a Discord role does
+#   NOT grant Telegram access.
+# - Sessions are per person, but long-term MEMORY is shared by the whole instance: what one
+#   person teaches the bot can show up for others on every platform. Accepted in this stack; to change it,
+#   turn off the "memory" toolset per platform with ./stack.sh hermes tools
+
+# Toolsets: Hermes keeps every toolset (terminal included) on every platform; accepted in this stack because
+# the terminal runs inside the Hermes container (no docker.sock). To restrict it later, remove "terminal" per
+# platform with ./stack.sh hermes tools, or use the global switch below (it also affects the CLI and dashboard).
+# agent:
+#   disabled_toolsets:
+#     - terminal
+
+# Discord channels and per-channel prompts
+discord:
+  auto_thread: true                        # each @bot mention opens its own thread
+  free_response_channels: "<id #hermes>"   # no @mention needed; comma-separated
+  ignored_channels:
+    - <id #general>                        # the bot never answers here
+  no_thread_channels:
+    - <id #hermes-ops>                     # answer inline, no thread
+  channel_prompts:
+    "<id #project-a>": |
+      This channel is for project A. Answer briefly, in the team's language, and use the internal
+      tools for lookups.
+
+# Slash commands: admins get everything, the team gets a short list
+gateway:
+  platforms:
+    discord:
+      extra:
+        allow_admin_from:
+          - "<discord admin user id 1>"
+          - "<discord admin user id 2>"
+        # /help and /whoami are always allowed. Deliberately NOT listed:
+        # update, config, pairing, cron, shell, memory (memory is shared by the whole team).
+        user_allowed_commands:
+          - new
+          - status
+          - model
+          - history
+        # Optional: separate lists for server channels (vs DMs)
+        group_allow_admin_from:
+          - "<discord admin user id 1>"
+        group_user_allowed_commands:
+          - new
+          - status

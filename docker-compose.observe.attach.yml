@@ -1,0 +1,17 @@
+# Merged into docker-compose.observe.yml by ./stack.sh where the app stack runs on the same host (STACK_APPS is not 0):
+# blackbox joins the app networks to check the services by name (cloudflared's /ready is on ops only).
+# The app stack creates these networks, so it starts first.
+services:
+  blackbox:
+    networks: [observe, backend, data, ops]
+
+networks:
+  ops:
+    name: stack_ops
+    external: true
+  backend:
+    name: stack_backend
+    external: true
+  data:
+    name: stack_data
+    external: true

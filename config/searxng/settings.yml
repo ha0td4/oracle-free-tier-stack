@@ -1,0 +1,23 @@
+# Internal SearXNG for the other containers; reachable only on the Docker "backend" network.
+use_default_settings: true
+
+general:
+  instance_name: "stack-search"
+
+server:
+  secret_key: "overridden-by-env"   # SEARXNG_SECRET overrides this
+  limiter: false                    # internal, no bot protection needed
+  image_proxy: false
+  public_instance: false
+
+search:
+  safe_search: 0
+  default_lang: auto
+  # json enabled so agents can call /search?q=...&format=json
+  formats:
+    - html
+    - json
+
+outgoing:
+  request_timeout: 4.0
+  max_request_timeout: 8.0

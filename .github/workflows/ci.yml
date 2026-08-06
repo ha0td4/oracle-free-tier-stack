@@ -1,0 +1,38 @@
+# Every push and pull request: shell scripts, Markdown, the docs builder and its tests.
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shellcheck:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: ShellCheck
+        run: |
+          docker run --rm -v "$PWD:/mnt:ro" -w /mnt koalaman/shellcheck:v0.10.0 -x -S warning \
+            stack.sh host/*.sh host/hub/*.sh backup/*.sh
+
+  markdown:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: markdownlint
+        run: docker run --rm -v "$PWD:/workdir" davidanson/markdownlint-cli2:v0.18.1 "**/*.md"
+
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - uses: pnpm/action-setup@v4
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm run build

@@ -1,0 +1,8 @@
+.env
+backup/backup.env
+config/hermes/dashboard-oidc.env
+data/
+docker-compose.override.yml
+docker-compose.observe.override.yml
+node_modules/
+dist/

@@ -1,0 +1,117 @@
+// Sizing logic for the Plan page: which tier fits a machine, and a tier file for any mix of components.
+// Pure functions, no DOM. The build embeds this file (and stack.mjs) into the page; the tests import it directly.
+import { planTier } from '../lib/stack.mjs';
+
+// Share of the usable RAM the container limits may add up to; the rest is for the OS, the page cache and swap.
+export const SHARE = 0.85;
+
+// Usable RAM of the reference VM, measured on the 12 GB shape (see CUSTOMIZE.md). The stack map and the guides use it too.
+export const REFERENCE_USABLE_MIB = 11922;
+
+// Usable RAM as a share of the nominal size.
+const USABLE_RATIO = REFERENCE_USABLE_MIB / 12288;
+
+// RAM the host itself uses before any container runs: a fixed part per setup plus page tables (about 1/64 of RAM).
+// Estimates. The 12 GB shape gave 655 MiB for the bare OS, and about 1,000 MiB is expected once Docker, Tailscale and CrowdSec run.
+export const HOST_PROFILES = {
+  full: { label: 'Docker, Tailscale and CrowdSec (the default host setup)', fixedMiB: 808 },
+  nocrowdsec: { label: 'Docker and Tailscale, no CrowdSec (SKIP_CROWDSEC=1)', fixedMiB: 658 },
+  lean: { label: 'Ubuntu minimal image, Docker and Tailscale only', fixedMiB: 400 },
+};
+
+// Memory limit to heap size: the Node.js heap must stay below the container limit. Matches the defaults in docker-compose.yml.
+export const HEAP = {
+  n8n: { env: 'N8N_HEAP_MB', ratio: 0.75 },
+  omniroute: { env: 'OMNIROUTE_HEAP_MB', ratio: 2 / 3 },
+};
+
+export const usableMiB = (gb) => Math.round(gb * 1024 * USABLE_RATIO);
+
+export const hostOverheadMiB = (usable, profile = 'full') => Math.round(HOST_PROFILES[profile].fixedMiB + usable / 64);
+
+// ruleMiB: the share rule. hardMiB: what is left after the host. The budget is the smaller of the two.
+export function budget({ usableMiB: usable, hostOverheadMiB: overhead, share = SHARE }) {
+  const ruleMiB = Math.floor(usable * share);
+  const hardMiB = Math.max(0, usable - overhead);
+  return { ruleMiB, hardMiB, availableMiB: Math.min(ruleMiB, hardMiB) };
+}
+
+export const toMemString = (mib) => (mib % 1024 === 0 ? `${mib / 1024}g` : `${mib}m`);
+
+// presets are ordered from the largest to the smallest tier.
+// status: "fits" (inside the budget), "tight" (over the share rule but still leaves the host its RAM), "no".
+export function fitPresets(presets, { usableMiB: usable, hostOverheadMiB: overhead, pageSize4k = true, share = SHARE }) {
+  const b = budget({ usableMiB: usable, hostOverheadMiB: overhead, share });
+  return presets.map((p) => {
+    const notes = [];
+    let status;
+    if (!pageSize4k && p.needs4k?.length) {
+      status = 'no';
+      notes.push(`needs 4K pages: ${p.needs4k.join(', ')}`);
+    } else if (p.totalMiB <= b.availableMiB) {
+      status = 'fits';
+    } else if (p.totalMiB <= b.hardMiB) {
+      status = 'tight';
+      notes.push(`over the ${Math.round(share * 100)}% rule by ${p.totalMiB - b.ruleMiB} MiB`);
+    } else {
+      status = 'no';
+      notes.push(`over by ${p.totalMiB - b.availableMiB} MiB (limits ${p.totalMiB} MiB, budget ${b.availableMiB} MiB)`);
+    }
+    return { name: p.name, totalMiB: p.totalMiB, status, notes };
+  });
+}
+
+export const recommend = (fit) => fit.find((f) => f.status === 'fits')?.name ?? null;
+
+// The limits a tier file sets, as the overrides buildTier takes: lets "use this tier as a start" keep its numbers.
+export function buildPresetStart(services, tier) {
+  const plan = planTier(services, tier);
+  const mem = {};
+  const cpus = {};
+  for (const s of plan.services) {
+    const svc = services.find((x) => x.name === s.name);
+    if (svc.memVar) mem[s.name] = s.memMiB;
+    if (svc.cpusVar) cpus[s.name] = s.cpus;
+  }
+  return { mem, cpus };
+}
+
+// A tier file for a selection of components. components: [{ name, requires, needs4k }] (see componentRows).
+export function buildTier({ services, components, selected, memOverrides = {}, cpuOverrides = {}, pageSize4k = true, name = 'mine' }) {
+  const order = [];
+  for (const s of services) for (const p of s.profiles) if (!order.includes(p)) order.push(p);
+
+  const wanted = new Set(selected);
+  const added = [];
+  for (let changed = true; changed;) {
+    changed = false;
+    for (const c of components) {
+      if (!wanted.has(c.name)) continue;
+      for (const need of c.requires) if (!wanted.has(need)) { wanted.add(need); added.push(need); changed = true; }
+    }
+  }
+  const profiles = order.filter((p) => wanted.has(p));
+
+  const byService = Object.fromEntries(services.map((s) => [s.name, s]));
+  const vars = {};
+  for (const [svc, mib] of Object.entries(memOverrides)) if (byService[svc]?.memVar) vars[byService[svc].memVar] = toMemString(mib);
+  for (const [svc, cpus] of Object.entries(cpuOverrides)) if (byService[svc]?.cpusVar) vars[byService[svc].cpusVar] = String(cpus);
+  const plan = planTier(services, { profiles, vars });
+
+  const memOf = (s) => memOverrides[s.name] ?? s.memMiB;
+  const lines = [
+    `# Generated by the Plan page. Save as tiers/${name}.env and run: ./stack.sh tier ${name}`,
+    `COMPOSE_PROFILES=${profiles.join(',')}`,
+  ];
+  for (const s of plan.services) {
+    const svc = byService[s.name];
+    if (svc.memVar) lines.push(`${svc.memVar}=${toMemString(memOf(s))}`);
+    if (HEAP[s.name]) lines.push(`${HEAP[s.name].env}=${Math.round(memOf(s) * HEAP[s.name].ratio)}`);
+    if (svc.cpusVar) lines.push(`${svc.cpusVar}=${s.cpus}`);
+  }
+
+  const warnings = [];
+  if (!pageSize4k) for (const c of components) if (wanted.has(c.name) && c.needs4k) warnings.push(`${c.name} needs 4K pages`);
+
+  return { profiles, added, services: plan.services, totalMiB: plan.totalMiB, env: `${lines.join('\n')}\n`, warnings };
+}

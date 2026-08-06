@@ -1,0 +1,12 @@
+// markdownlint-cli2: npx markdownlint-cli2 "**/*.md" (CI runs the same)
+{
+  "config": {
+    // The docs wrap at 140 characters; tables and code keep their own width
+    "MD013": { "line_length": 140, "tables": false, "code_blocks": false },
+    // Numbered steps continue after a code block at column 0 (the guide builder reads blocks there)
+    "MD029": false,
+    // Headings may repeat under different parents (the same step name in two guides)
+    "MD024": { "siblings_only": true }
+  },
+  "ignores": ["node_modules/**", "dist/**"]
+}

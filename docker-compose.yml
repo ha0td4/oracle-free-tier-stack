@@ -1,0 +1,336 @@
+# No published ports: public traffic enters through Cloudflare Tunnel, admin through Tailscale.
+# One profile per component (the service name); tiers/*.env lists the ones to run. Use ./stack.sh, not docker compose.
+name: stack
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+x-base: &base
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 512
+  logging: *logging
+
+# Chromium runs many processes. Both images start it with --no-sandbox, so no-new-privileges is safe.
+x-base-browser: &base-browser
+  <<: *base
+  pids_limit: 2048
+
+# Nothing reads the health state but docker ps, so the check runs every 2 min (every 5 s while the container starts)
+x-healthcheck: &healthcheck
+  interval: 120s
+  timeout: 5s
+  retries: 3
+  start_period: 1m
+  start_interval: 5s
+
+services:
+  cloudflared:
+    <<: *base
+    image: cloudflare/cloudflared:${VER_CLOUDFLARED:?}
+    # Metrics (/ready, /debug, /config) on the ops alias only: blackbox checks /ready, Hermes on edge must not reach them.
+    # No healthcheck: no shell in the image.
+    command: tunnel --no-autoupdate --metrics cloudflared-metrics:2000 run
+    environment:
+      TUNNEL_TOKEN: ${CF_TUNNEL_TOKEN:?Set CF_TUNNEL_TOKEN in .env}
+    cap_drop: [ALL]               # runs as uid 65532 and writes nothing
+    read_only: true
+    mem_limit: ${MEM_CLOUDFLARED:-128m}
+    networks:
+      edge:
+        ipv4_address: 172.30.0.2   # fixed: trusted proxy for Hermes, Pocket ID and Open WebUI
+      ops:
+        aliases: [cloudflared-metrics]
+
+  n8n:
+    <<: *base
+    image: docker.n8n.io/n8nio/n8n:${VER_N8N:?}
+    profiles: [n8n]
+    environment:
+      TZ: ${TZ}
+      GENERIC_TIMEZONE: ${TZ}
+      N8N_HOST: n8n.${DOMAIN}
+      N8N_PORT: "5678"
+      N8N_PROTOCOL: https
+      N8N_EDITOR_BASE_URL: https://n8n.${DOMAIN}/
+      WEBHOOK_URL: https://n8n.${DOMAIN}/
+      N8N_PROXY_HOPS: "1"
+      # LOSING THIS KEY = LOSING ALL n8n CREDENTIALS
+      N8N_ENCRYPTION_KEY: ${N8N_ENCRYPTION_KEY:?}
+      N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS: "true"
+      N8N_DIAGNOSTICS_ENABLED: "false"
+      N8N_PERSONALIZATION_ENABLED: "false"
+      # Owner from .env (DEPLOY.md D5): stack.sh sets N8N_OWNER_MANAGED=true once ADMIN_EMAIL and the hash are there
+      N8N_INSTANCE_OWNER_MANAGED_BY_ENV: ${N8N_OWNER_MANAGED:-false}
+      N8N_INSTANCE_OWNER_EMAIL: ${ADMIN_EMAIL:-}
+      N8N_INSTANCE_OWNER_FIRST_NAME: ${N8N_OWNER_FIRST_NAME:-Admin}
+      N8N_INSTANCE_OWNER_LAST_NAME: ${N8N_OWNER_LAST_NAME:-Owner}
+      N8N_INSTANCE_OWNER_PASSWORD_HASH: ${N8N_OWNER_PASSWORD_HASH:-}
+      # SQLite keeps the backup to one file; Postgres (postgres profile) is for other workloads.
+      DB_SQLITE_POOL_SIZE: "2"
+      EXECUTIONS_DATA_PRUNE: "true"
+      EXECUTIONS_DATA_MAX_AGE: "168"
+      EXECUTIONS_DATA_PRUNE_MAX_COUNT: "5000"
+      NODE_OPTIONS: --max-old-space-size=${N8N_HEAP_MB:-768}
+    volumes:
+      - ./data/n8n:/home/node/.n8n
+    cap_drop: [ALL]               # runs as node (uid 1000)
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:5678/healthz"]
+      start_period: 2m
+    mem_limit: ${MEM_N8N:-1g}
+    networks: [edge, backend, data]
+
+  omniroute:
+    <<: *base
+    image: diegosouzapw/omniroute:${VER_OMNIROUTE:?}
+    profiles: [omniroute]
+    environment:
+      TZ: ${TZ}
+      DATA_DIR: /app/data
+      REQUIRE_API_KEY: "true"
+      INITIAL_PASSWORD: ${OMNIROUTE_PASSWORD:?}
+      JWT_SECRET: ${OMNIROUTE_JWT_SECRET:?}
+      API_KEY_SECRET: ${OMNIROUTE_API_KEY_SECRET:?}
+      NEXT_PUBLIC_BASE_URL: https://ai.${DOMAIN}
+      OMNIROUTE_MEMORY_MB: ${OMNIROUTE_HEAP_MB:-1024}
+    volumes:
+      - ./data/omniroute:/app/data
+    cap_drop: [ALL]               # runs as node (uid 1000)
+    healthcheck: *healthcheck     # the image's test, our timing
+    mem_limit: ${MEM_OMNIROUTE:-1536m}
+    networks: [edge, backend]
+
+  hermes:
+    <<: *base-browser
+    image: nousresearch/hermes-agent:${VER_HERMES:?}
+    profiles: [hermes]
+    command: gateway run
+    # Dashboard is admin-only: basic auth, plus OIDC via the optional dashboard-oidc.env (see its .example).
+    env_file:
+      - path: ./config/hermes/dashboard-oidc.env
+        required: false
+    environment:
+      TZ: ${TZ}
+      HERMES_DASHBOARD: "1"
+      HERMES_DASHBOARD_PUBLIC_URL: https://hermes.${DOMAIN}
+      HERMES_DASHBOARD_BASIC_AUTH_USERNAME: ${HERMES_DASHBOARD_USER:-admin}
+      HERMES_DASHBOARD_BASIC_AUTH_PASSWORD: ${HERMES_DASHBOARD_PASSWORD:?}
+      HERMES_DASHBOARD_BASIC_AUTH_SECRET: ${HERMES_DASHBOARD_SECRET:?}
+      # OpenAI-compatible API for Open WebUI, on Hermes' networks only. Its key (API_SERVER_KEY) is generated into
+      # data/hermes/.env at the first start: never set it here. Allowlists: data/hermes/.env; channels: data/hermes/config.yaml.
+      API_SERVER_HOST: 0.0.0.0
+    volumes:
+      - ./data/hermes:/opt/data
+    # Default capabilities: s6-overlay supervises as root (user remap, chown, signals to the hermes user's processes) and
+    # the agent's tools may ask it for root work; the agent itself runs as uid 10000.
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://127.0.0.1:8642/health"]
+      start_period: 3m
+    shm_size: 1g
+    mem_limit: ${MEM_HERMES:-3g}
+    cpus: ${CPU_HERMES:-1.5}
+    # Low CPU weight (default 1024): when both cores are busy, n8n, OmniRoute and the tunnel win.
+    cpu_shares: 512
+    networks: [edge, backend, data]   # not ops: a multi-user agent must not reach the admin tools
+
+  searxng:
+    <<: *base
+    image: searxng/searxng:${VER_SEARXNG:?}
+    profiles: [searxng]
+    environment:
+      SEARXNG_BASE_URL: http://searxng:8080/
+      SEARXNG_SECRET: ${SEARXNG_SECRET:?}
+    # Only the settings file, read-only: a mounted directory is chowned to the image's searxng user (uid 977) on every start
+    volumes:
+      - ./config/searxng/settings.yml:/etc/searxng/settings.yml:ro
+    # Runs as root; the entrypoint chowns its directories when they are not the searxng user's (upstream's capability set)
+    cap_drop: [ALL]
+    cap_add: [CHOWN, SETGID, SETUID]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      start_period: 1m
+    mem_limit: ${MEM_SEARXNG:-512m}
+    networks: [backend]
+
+  # Pocket ID: OIDC (passkeys) for Cloudflare Access, Open WebUI, the Hermes dashboard and Grafana. id.DOMAIN must BYPASS
+  # Cloudflare Access: apps call /.well-known and /api/oidc/* server-side. ./stack.sh up creates the admin (IDENTITY.md F1).
+  pocket-id:
+    <<: *base
+    image: pocketid/pocket-id:${VER_POCKET_ID:?}      # Docker Hub build (arm64 verified)
+    profiles: [pocket-id]
+    environment:
+      TZ: ${TZ}
+      APP_URL: https://id.${DOMAIN}
+      TRUST_PROXY: "172.30.0.2"            # cloudflared
+      ENCRYPTION_KEY: ${POCKETID_ENCRYPTION_KEY:?}
+    volumes:
+      - ./data/pocket-id:/app/data
+    # Starts as root to chown /app/data, then su-exec to uid 1000
+    cap_drop: [ALL]
+    healthcheck: *healthcheck     # the image's test, our timing
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    mem_limit: ${MEM_POCKETID:-256m}
+    networks: [edge]
+
+  crawl4ai:
+    <<: *base-browser
+    image: unclecode/crawl4ai:${VER_CRAWL4AI:?}
+    profiles: [crawl4ai]
+    environment:
+      # Without a token Crawl4AI listens on its own loopback only: no other container could reach it
+      CRAWL4AI_API_TOKEN: ${CRAWL4AI_API_TOKEN:?}
+      GUNICORN_BIND: "0.0.0.0:11235"
+    cap_drop: [ALL]               # runs as appuser
+    healthcheck: *healthcheck     # the image's test, our timing
+    shm_size: 1g
+    mem_limit: ${MEM_CRAWL4AI:-1536m}
+    cpus: ${CPU_CRAWL4AI:-1.0}
+    cpu_shares: 256     # lowest weight in the stack: background work
+    networks: [backend]
+
+  # Chat at chat.DOMAIN. Login: admin from .env (DEPLOY.md D7), then Pocket ID (IDENTITY.md F5). Most settings below only
+  # seed the first start; afterwards the Admin panel keeps them (OAuth always follows this file).
+  open-webui:
+    <<: *base
+    image: ghcr.io/open-webui/open-webui:${VER_OPEN_WEBUI:?}
+    profiles: [open-webui]
+    environment:
+      WEBUI_URL: https://chat.${DOMAIN}
+      WEBUI_SECRET_KEY: ${OPENWEBUI_SECRET_KEY:?}     # keep it: changing it ends every session and OAuth token
+      FORWARDED_ALLOW_IPS: "172.30.0.2"               # cloudflared
+      WEBUI_SESSION_COOKIE_SECURE: "true"
+      ENABLE_SIGNUP: "false"                          # nobody signs up: the admin comes from .env, members through Pocket ID
+      WEBUI_ADMIN_EMAIL: ${ADMIN_EMAIL:-}             # creates the admin on the first start only (empty database)
+      WEBUI_ADMIN_PASSWORD: ${OPENWEBUI_ADMIN_PASSWORD:-}
+      WEBUI_ADMIN_NAME: Admin
+      ENABLE_OAUTH_SIGNUP: "true"
+      OAUTH_MERGE_ACCOUNTS_BY_EMAIL: "true"           # Pocket ID verifies emails (IDENTITY.md F1)
+      OPENID_PROVIDER_URL: https://id.${DOMAIN}/.well-known/openid-configuration
+      OPENID_REDIRECT_URI: https://chat.${DOMAIN}/oauth/oidc/callback   # the callback set in Pocket ID, not guessed from headers
+      OAUTH_CODE_CHALLENGE_METHOD: S256               # PKCE: the Pocket ID client has it on and refuses requests without it
+      OAUTH_CLIENT_ID: ${OPENWEBUI_OIDC_CLIENT_ID:-}
+      OAUTH_CLIENT_SECRET: ${OPENWEBUI_OIDC_CLIENT_SECRET:-}
+      OAUTH_PROVIDER_NAME: Pocket ID
+      # Straight to Pocket ID once the form is off (first start only; then Admin Panel). Admin password: /auth?form=true
+      OAUTH_AUTO_REDIRECT: "true"
+      ENABLE_LOGIN_FORM: "false"
+      OAUTH_SCOPES: openid email profile groups
+      ENABLE_OAUTH_ROLE_MANAGEMENT: "true"
+      OAUTH_ROLES_CLAIM: groups
+      OAUTH_ALLOWED_ROLES: members,admins
+      OAUTH_ADMIN_ROLES: admins
+      ENABLE_OAUTH_GROUP_MANAGEMENT: "true"
+      ENABLE_OAUTH_GROUP_CREATION: "true"
+      ENABLE_ADMIN_CHAT_ACCESS: "false"               # admins cannot read members' chats
+      ENABLE_OLLAMA_API: "false"
+      OPENAI_API_BASE_URLS: http://omniroute:20128/v1;http://hermes:8642/v1
+      OPENAI_API_KEYS: ${OPENWEBUI_OMNIROUTE_KEY:-};    # Hermes' key comes from data/hermes/.env, pasted in the Admin panel
+      # Documents: embeddings through OmniRoute, so no local model takes RAM
+      RAG_EMBEDDING_ENGINE: openai
+      RAG_OPENAI_API_BASE_URL: http://omniroute:20128/v1
+      RAG_OPENAI_API_KEY: ${OPENWEBUI_OMNIROUTE_KEY:-}
+      RAG_EMBEDDING_MODEL: ${OPENWEBUI_EMBEDDING_MODEL:-text-embedding-3-small}
+      ENABLE_WEB_SEARCH: "true"
+      WEB_SEARCH_ENGINE: searxng
+      SEARXNG_QUERY_URL: http://searxng:8080/search?q=<query>
+      ENABLE_COMMUNITY_SHARING: "false"
+      ENABLE_VERSION_UPDATE_CHECK: "false"            # pinned in versions.env
+      ENABLE_DIRECT_CONNECTIONS: "false"
+      ENABLE_API_KEYS: "false"
+    volumes:
+      - ./data/open-webui:/app/backend/data
+    # Runs as root and writes into data/open-webui, which may belong to the host user
+    cap_drop: [ALL]
+    healthcheck: *healthcheck     # the image's test, our timing
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    mem_limit: ${MEM_OPENWEBUI:-1g}
+    networks: [edge, backend]
+
+  # Admin launcher (static page, nothing to back up). Config: config/dash/config.yml.
+  homer:
+    <<: *base
+    image: b4bz/homer:${VER_HOMER:?}
+    profiles: [homer]
+    environment:
+      INIT_ASSETS: "0"          # use only the rendered config
+    volumes:
+      - ./data/dash:/www/assets:ro
+    cap_drop: [ALL]               # runs as uid 1000
+    healthcheck: *healthcheck     # the image's test, our timing
+    read_only: true
+    tmpfs: ["/tmp:size=8m"]
+    mem_limit: ${MEM_HOMER:-128m}
+    networks: [ops]
+
+  postgres:
+    <<: *base
+    image: postgres:${VER_POSTGRES:?}
+    profiles: [postgres]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-app}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?}
+      POSTGRES_DB: ${POSTGRES_DB:-app}
+    command: >
+      postgres -c shared_buffers=128MB -c effective_cache_size=384MB
+               -c work_mem=4MB -c max_connections=50
+    volumes:
+      - ./data/postgres:/var/lib/postgresql   # Postgres 18+ keeps its data in a versioned subdirectory
+    # Default capabilities: the entrypoint starts as root, chowns the data and switches user (cap_drop not verified yet)
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "pg_isready", "-q", "-U", "${POSTGRES_USER:-app}", "-d", "${POSTGRES_DB:-app}"]
+      start_period: 1m
+    mem_limit: ${MEM_POSTGRES:-512m}
+    networks: [data]
+
+  valkey:
+    <<: *base
+    image: valkey/valkey:${VER_VALKEY:?}
+    profiles: [valkey]
+    # The password comes from a config file, not the command line, where ps on the host and docker inspect would show it
+    configs:
+      - source: valkey-auth
+        target: /valkey-auth.conf
+    command: >
+      valkey-server /valkey-auth.conf
+                    --maxmemory 128mb --maxmemory-policy allkeys-lru
+                    --save 300 10 --appendonly no
+    volumes:
+      - ./data/valkey:/data
+    # Default capabilities, as for postgres. A NOAUTH answer also shows the server is up.
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD-SHELL", "valkey-cli ping 2>&1 | grep -qE 'PONG|NOAUTH'"]
+      start_period: 30s
+    mem_limit: ${MEM_VALKEY:-192m}
+    networks: [data]
+
+configs:
+  valkey-auth:
+    content: |
+      requirepass "${VALKEY_PASSWORD:?}"
+
+# Fixed names: the observe project joins them (docker-compose.observe.attach.yml).
+networks:
+  # Apps cloudflared forwards to (n8n, OmniRoute, Hermes, Pocket ID, Open WebUI)
+  edge:
+    name: stack_edge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+          ip_range: 172.30.0.128/25   # dynamic IPs; .2 is reserved for cloudflared
+  # Admin tools (Homer) and cloudflared's metrics, kept off edge so Hermes cannot reach them; blackbox joins to check them
+  ops:
+    name: stack_ops
+  # Internal tools with Internet access; unreachable from cloudflared
+  backend:
+    name: stack_backend
+  # Databases: no Internet, internal apps only
+  data:
+    name: stack_data
+    internal: true

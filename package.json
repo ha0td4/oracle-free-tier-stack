@@ -1,0 +1,21 @@
+{
+  "name": "oracle-free-tier-stack-guide",
+  "private": true,
+  "type": "module",
+  "description": "Builds the stack map and guides site from the markdown docs",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "node --test \"tools/**/*.test.mjs\"",
+    "test:fast": "node --test \"tools/**/!(stack-sh).test.mjs\"",
+    "build": "node tools/build-guide.mjs",
+    "check": "npm test && npm run build",
+    "serve": "node tools/serve.mjs",
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\""
+  },
+  "dependencies": {
+    "marked": "18.1.1"
+  },
+  "packageManager": "pnpm@10.34.6"
+}

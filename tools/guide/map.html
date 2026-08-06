@@ -1,0 +1,337 @@
+    <section id="layers">
+      <h2><small>01</small>Stack layers</h2>
+      <p class="intro">Seven layers, outside in. Each talks only to its neighbour, so if one is exposed the layers behind it stay protected.</p>
+      <div class="layers">
+        <div class="layer" style="--zc: var(--z-cf)">
+          <h4>Entry<span>Cloudflare Free</span></h4>
+          <ul>
+            <li><b>DNS and SSL</b> <em>for the root domain (blog, unchanged) and the subdomains.</em></li>
+            <li><b>Access</b> <em>asks for a login (an emailed code, or a Pocket ID passkey after F2) before any subdomain opens.</em></li>
+            <li><b>WAF</b> <em>rate-limits <code>/webhook</code>; can geo-block.</em></li>
+          </ul>
+        </div>
+        <div class="layer" style="--zc: var(--z-cf)">
+          <h4>Tunnel<span>cloudflared</span></h4>
+          <ul>
+            <li><b>Tunnel</b> <em>the VM connects out to Cloudflare, so no port needs opening. It reaches only the <code>edge</code> (apps) and <code>ops</code> (admin tools) networks.</em></li>
+          </ul>
+        </div>
+        <div class="layer" style="--zc: var(--z-edge)">
+          <h4>Apps<span>edge network</span></h4>
+          <ul>
+            <li data-component="n8n"><b>n8n</b> <em>workflows, webhooks, cron. Data in SQLite.</em></li>
+            <li data-component="omniroute"><b>OmniRoute</b> <em>AI gateway: many providers behind one OpenAI-compatible endpoint, with automatic fallback.</em></li>
+            <li data-component="hermes"><b>Hermes Agent</b> <em>24/7 agent: the team uses it over Discord, Telegram runs alongside for personal use (one session per person); web dashboard is admin-only.</em></li>
+            <li data-component="pocket-id"><b>Pocket ID</b> <em>shared passkey login (OIDC) for Cloudflare Access, the Hermes dashboard, Grafana and Open WebUI.</em></li>
+            <li data-component="open-webui"><b>Open WebUI</b> <em>chat page (yours, and members' once you open it to a team): models from OmniRoute, Hermes as the model <code>hermes-agent</code>, web search through SearXNG, n8n workflows as tools (MCP).</em></li>
+          </ul>
+        </div>
+        <div class="layer" style="--zc: var(--z-back)">
+          <h4>Agent tools<span>backend network</span></h4>
+          <ul>
+            <li data-component="searxng"><b>SearXNG</b> <em>private search engine returning JSON to n8n; Hermes uses it as its built-in web search.</em></li>
+            <li data-component="crawl4ai"><b>Crawl4AI</b> <em>turns web pages into clean markdown; has an MCP endpoint. Every request needs its bearer token.</em></li>
+          </ul>
+        </div>
+        <div class="layer" style="--zc: var(--z-data)">
+          <h4>Data<span>data network · optional</span></h4>
+          <ul>
+            <li data-component="postgres valkey"><b>Postgres and Valkey</b> <em>only in the <code>full</code> tier. On a network with no Internet; only internal apps can reach them.</em></li>
+          </ul>
+        </div>
+        <div class="layer" style="--zc: var(--z-ops)">
+          <h4>Monitoring<span>ops network · the observe Compose project · the hub on its own VM, always on</span></h4>
+          <ul>
+            <li data-component="alloy"><b>Grafana Alloy</b> <em>the agent on this VM: host metrics, container metrics and logs, the journal and the service checks, pushed to the monitoring hub over the VCN.</em></li>
+            <li data-component="blackbox"><b>blackbox</b> <em>makes the service checks (HTTP, keyword, TCP) Alloy asks for, by name on the app networks.</em></li>
+            <li data-component="socket-proxy"><b>socket-proxy</b> <em>read-only Docker API; Alloy goes through it.</em></li>
+            <li data-component="homer"><b>Homer</b> <em>static admin launcher at <code>dash.</code>: links to every admin tool, no data of its own.</em></li>
+            <li data-hub="prometheus"><b>Prometheus</b> <em>on the monitoring hub, its own small VM (the free 1 GB E2.1.Micro) with systemd services and no Docker: keeps the metrics the hosts push, 90 days.</em></li>
+            <li data-hub="loki"><b>Loki</b> <em>on the hub: keeps the container logs and the journal, 90 days.</em></li>
+            <li><b>Tempo</b> <em>optional on the hub (<code>deploy-hub.sh --tempo</code>): keeps the traces apps send over OTLP, 30 days. Off by default: no app sends traces yet.</em></li>
+            <li data-hub="grafana"><b>Grafana</b> <em>on the hub: the Hosts, Containers, Logs and Services dashboards at <code>monitor.</code>, through the hub's own tunnel (<code>oracle-observe</code>).</em></li>
+            <li data-hub="node_exporter"><b>node_exporter</b> <em>on the hub: the hub's own host metrics, next to the ones the hosts push.</em></li>
+            <li><b>ops network</b> <em>keeps Homer away from Hermes; a host firewall rule stops every container, Hermes included, from reaching the hub's logs and metrics.</em></li>
+          </ul>
+        </div>
+        <div class="layer" style="--zc: var(--z-host)">
+          <h4>Host<span>Oracle Linux 10 · SELinux · firewalld</span></h4>
+          <ul>
+            <li><b>Tailscale</b> <em>your private path for SSH and admin.</em></li>
+            <li><b>CrowdSec</b> <em>blocks bad IPs at the firewall using community blocklists.</em></li>
+            <li><b>restic</b> <em>encrypted backup at 03:30 to Oracle Object Storage plus a copy at R2 or B2.</em></li>
+            <li><b>Swap 4 GB, log rotation, automatic security updates</b> <em>(dnf-automatic). SELinux stays Enforcing; firewalld trusts the Tailscale interface.</em></li>
+            <li><b>4K kernel pages</b> <em>are required: a 64K kernel breaks Valkey and Chromium. The setup script checks first.</em></li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="diagram">
+      <h2><small>02</small>System diagram</h2>
+      <p class="intro">Solid arrows are inbound requests. Dashed arrows are the VM calling out: the tunnel, Hermes polling Discord and Telegram, and backups. That is why no inbound port is needed.</p>
+      <div class="diagram">
+        <svg viewBox="0 0 1000 640" role="img" aria-labelledby="dgt">
+          <title id="dgt">Diagram: Internet through Cloudflare, tunnel into the VM, the edge, ops, backend, data and socket networks, and the host layer</title>
+          <defs>
+            <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="ahc" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path class="head cf" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+
+          <!-- Outside -->
+          <text class="zt t-vm" x="16" y="34">Outside</text>
+          <rect class="nd" x="16" y="50" width="160" height="44" rx="6"/>
+          <text class="lbl" x="96" y="69" text-anchor="middle">You · browser</text>
+          <text class="sub" x="96" y="85" text-anchor="middle">*.DOMAIN</text>
+
+          <rect class="nd" x="16" y="118" width="160" height="44" rx="6"/>
+          <text class="lbl" x="96" y="137" text-anchor="middle">External webhooks</text>
+          <text class="sub" x="96" y="153" text-anchor="middle">GitHub, forms, APIs…</text>
+
+          <g data-hub="prometheus loki grafana node_exporter">
+            <rect class="nd" x="16" y="190" width="160" height="80" rx="6"/>
+            <text class="lbl" x="96" y="209" text-anchor="middle">Monitoring hub VM</text>
+            <text class="sub" x="96" y="225" text-anchor="middle">Prometheus · Loki</text>
+            <text class="sub" x="96" y="240" text-anchor="middle">Grafana · node_exporter</text>
+            <text class="sub" x="96" y="255" text-anchor="middle">systemd · own tunnel</text>
+          </g>
+
+          <rect class="nd" x="16" y="300" width="160" height="44" rx="6"/>
+          <text class="lbl" x="96" y="319" text-anchor="middle">Discord · Telegram</text>
+          <text class="sub" x="96" y="335" text-anchor="middle">Hermes bot · own session</text>
+
+          <rect class="nd" x="16" y="420" width="160" height="44" rx="6"/>
+          <text class="lbl" x="96" y="439" text-anchor="middle">Host + Tailscale</text>
+          <text class="sub" x="96" y="455" text-anchor="middle">SSH, admin</text>
+
+          <rect class="nd" x="16" y="500" width="160" height="44" rx="6"/>
+          <text class="lbl" x="96" y="519" text-anchor="middle">Oracle Object Storage</text>
+          <text class="sub" x="96" y="535" text-anchor="middle">primary backup repo</text>
+
+          <rect class="nd" x="16" y="556" width="160" height="44" rx="6"/>
+          <text class="lbl" x="96" y="575" text-anchor="middle">Cloudflare R2 / B2</text>
+          <text class="sub" x="96" y="591" text-anchor="middle">secondary backup repo</text>
+
+          <!-- Cloudflare -->
+          <rect class="z-cf" x="200" y="40" width="140" height="180" rx="8" stroke-width="1.4"/>
+          <text class="zt t-cf" x="212" y="60">Cloudflare</text>
+          <text class="note" x="212" y="86">SSL · DNS</text>
+          <text class="note" x="212" y="106">Access (code / passkey)</text>
+          <text class="note" x="212" y="126">WAF · rate limit</text>
+          <text class="note" x="212" y="146">Bypass: /webhook</text>
+          <text class="note" x="212" y="196">Blog on the root</text>
+          <text class="note" x="212" y="211">domain, untouched</text>
+
+          <!-- VM -->
+          <rect class="z-vm" x="366" y="16" width="618" height="612" rx="10"/>
+          <text class="zt t-vm" x="380" y="36">Oracle A1 VM · 2 OCPU · 12 GB</text>
+
+          <g data-component="cloudflared">
+            <rect class="nd" x="382" y="110" width="110" height="52" rx="6" style="stroke: var(--z-cf)"/>
+            <text class="lbl" x="437" y="132" text-anchor="middle">cloudflared</text>
+            <text class="sub" x="437" y="149" text-anchor="middle">172.30.0.2</text>
+          </g>
+
+          <!-- the two networks cloudflared reaches: edge (apps) and ops (admin tools) -->
+          <rect class="z-reach" x="512" y="52" width="250" height="276" rx="8"/>
+          <text class="zt t-vm" x="524" y="70">cloudflared reaches</text>
+
+          <rect class="z-edge" x="518" y="78" width="238" height="140" rx="6" stroke-width="1.2"/>
+          <text class="zt t-edge" x="528" y="94">edge network</text>
+          <g data-component="n8n">
+            <rect class="nd" x="524" y="100" width="110" height="34" rx="6"/>
+            <text class="lbl" x="579" y="115" text-anchor="middle">n8n</text>
+            <text class="sub" x="579" y="128" text-anchor="middle">:5678</text>
+          </g>
+          <g data-component="omniroute">
+            <rect class="nd" x="642" y="100" width="110" height="34" rx="6"/>
+            <text class="lbl" x="697" y="115" text-anchor="middle">OmniRoute</text>
+            <text class="sub" x="697" y="128" text-anchor="middle">:20128</text>
+          </g>
+          <g data-component="hermes">
+            <rect class="nd" x="524" y="138" width="110" height="34" rx="6"/>
+            <text class="lbl" x="579" y="153" text-anchor="middle">Hermes</text>
+            <text class="sub" x="579" y="166" text-anchor="middle">:9119 · :8642</text>
+          </g>
+          <g data-component="pocket-id">
+            <rect class="nd" x="642" y="138" width="110" height="34" rx="6"/>
+            <text class="lbl" x="697" y="153" text-anchor="middle">Pocket ID</text>
+            <text class="sub" x="697" y="166" text-anchor="middle">:1411 · OIDC</text>
+          </g>
+          <g data-component="open-webui">
+            <rect class="nd" x="524" y="176" width="228" height="34" rx="6"/>
+            <text class="lbl" x="638" y="191" text-anchor="middle">Open WebUI</text>
+            <text class="sub" x="638" y="204" text-anchor="middle">:8080 · chat page</text>
+          </g>
+
+          <rect class="z-ops" x="518" y="224" width="238" height="92" rx="6" stroke-width="1.2"/>
+          <text class="zt t-ops" x="528" y="240">ops network · no Hermes</text>
+          <g data-component="blackbox">
+            <rect class="nd" x="524" y="248" width="110" height="40" rx="6"/>
+            <text class="lbl" x="579" y="263" text-anchor="middle">blackbox</text>
+            <text class="sub" x="579" y="276" text-anchor="middle">:9115 · checks</text>
+          </g>
+          <g data-component="homer">
+            <rect class="nd" x="642" y="248" width="110" height="40" rx="6"/>
+            <text class="lbl" x="697" y="263" text-anchor="middle">Homer</text>
+            <text class="sub" x="697" y="276" text-anchor="middle">:8080</text>
+          </g>
+          <text class="sub" x="528" y="306">blackbox is also on backend + data</text>
+
+          <!-- backend -->
+          <rect class="z-back" x="784" y="52" width="184" height="140" rx="8" stroke-width="1.4"/>
+          <text class="zt t-back" x="796" y="72">backend network</text>
+          <g data-component="searxng">
+            <rect class="nd" x="796" y="84" width="160" height="42" rx="6"/>
+            <text class="lbl" x="876" y="102" text-anchor="middle">SearXNG</text>
+            <text class="sub" x="876" y="118" text-anchor="middle">:8080 · JSON</text>
+          </g>
+          <g data-component="crawl4ai">
+            <rect class="nd" x="796" y="136" width="160" height="42" rx="6"/>
+            <text class="lbl" x="876" y="154" text-anchor="middle">Crawl4AI</text>
+            <text class="sub" x="876" y="170" text-anchor="middle">:11235 · MCP</text>
+          </g>
+
+          <!-- data -->
+          <rect class="z-data" x="784" y="206" width="184" height="116" rx="8" stroke-width="1.4"/>
+          <text class="zt t-data" x="796" y="226">data network</text>
+          <g data-component="postgres">
+            <rect class="nd" x="796" y="238" width="76" height="42" rx="6"/>
+            <text class="lbl" x="834" y="256" text-anchor="middle">Postgres</text>
+            <text class="sub" x="834" y="272" text-anchor="middle">:5432</text>
+          </g>
+          <g data-component="valkey">
+            <rect class="nd" x="880" y="238" width="76" height="42" rx="6"/>
+            <text class="lbl" x="918" y="256" text-anchor="middle">Valkey</text>
+            <text class="sub" x="918" y="272" text-anchor="middle">:6379</text>
+          </g>
+          <text class="note" x="796" y="304">no Internet · full tier</text>
+
+          <!-- socket -->
+          <g data-component="socket-proxy">
+            <rect class="nd" x="512" y="336" width="250" height="44" rx="6"/>
+            <text class="lbl" x="637" y="355" text-anchor="middle">socket-proxy</text>
+            <text class="sub" x="637" y="371" text-anchor="middle">read-only Docker API for Alloy · :2375</text>
+          </g>
+
+          <!-- host -->
+          <rect class="z-host" x="382" y="400" width="586" height="190" rx="8" stroke-width="1.4"/>
+          <text class="zt t-host" x="396" y="420">host Oracle Linux 10</text>
+          <rect class="nd" x="396" y="434" width="132" height="48" rx="6"/>
+          <text class="lbl" x="462" y="454" text-anchor="middle">Tailscale</text>
+          <text class="sub" x="462" y="471" text-anchor="middle">SSH over tailnet</text>
+          <rect class="nd" x="538" y="434" width="132" height="48" rx="6"/>
+          <text class="lbl" x="604" y="454" text-anchor="middle">CrowdSec</text>
+          <text class="sub" x="604" y="471" text-anchor="middle">firewall bouncer</text>
+          <g data-component="alloy">
+            <rect class="nd" x="680" y="434" width="132" height="48" rx="6"/>
+            <text class="lbl" x="746" y="454" text-anchor="middle">Alloy</text>
+            <text class="sub" x="746" y="471" text-anchor="middle">metrics + logs → hub</text>
+          </g>
+          <rect class="nd" x="822" y="434" width="132" height="48" rx="6"/>
+          <text class="lbl" x="888" y="454" text-anchor="middle">restic</text>
+          <text class="sub" x="888" y="471" text-anchor="middle">daily at 03:30</text>
+          <text class="note" x="396" y="514">Docker · SELinux · firewalld · swap 4 GB · dnf-automatic</text>
+          <text class="note" x="396" y="536">Bound to 127.0.0.1 only: 2375 socket-proxy · 9115 blackbox · 12345 Alloy</text>
+          <text class="warn" x="396" y="566">Oracle Security List: no ingress rules</text>
+
+          <!-- arrows -->
+          <path class="ar" d="M176,72 H198" marker-end="url(#ah)"/>
+          <path class="ar" d="M176,140 H198" marker-end="url(#ah)"/>
+          <path class="ar tun" d="M340,136 H380" marker-end="url(#ahc)"/>
+          <text class="sub" x="360" y="128" text-anchor="middle">tunnel</text>
+          <path class="ar" d="M492,136 H510" marker-end="url(#ah)"/>
+          <path class="ar" d="M762,118 H782" marker-end="url(#ah)"/>
+          <path class="ar" d="M762,214 H782" marker-end="url(#ah)"/>
+          <path class="ar" d="M746,432 V382" marker-end="url(#ah)"/>
+          <path class="ar out" d="M394,474 H320 V240 H178" marker-end="url(#ah)"/>
+          <text class="sub" x="250" y="276" text-anchor="middle">Alloy pushes over the VCN</text>
+          <path class="ar out" d="M524,155 H504 V322 H178" marker-end="url(#ah)"/>
+          <text class="sub" x="272" y="314" text-anchor="middle">Hermes polls outbound</text>
+          <path class="ar" d="M176,442 H300 V458 H394" marker-end="url(#ah)"/>
+          <text class="sub" x="300" y="434" text-anchor="middle">private tailnet</text>
+          <path class="ar out" d="M888,482 V608 H196 V522 H178" marker-end="url(#ah)"/>
+          <path class="ar out" d="M196,578 H178" marker-end="url(#ah)"/>
+          <text class="sub" x="620" y="602" text-anchor="middle">restic · client-side encryption</text>
+        </svg>
+      </div>
+      <div class="legend">
+        <span><i style="--zc: var(--z-cf)"></i>Cloudflare / tunnel</span>
+        <span><i style="--zc: var(--z-edge)"></i>edge network (apps with a UI)</span>
+        <span><i style="--zc: var(--z-ops)"></i>ops network (admin tools)</span>
+        <span><i style="--zc: var(--z-back)"></i>backend network (internal tools)</span>
+        <span><i style="--zc: var(--z-data)"></i>data network (no Internet)</span>
+        <span><i style="--zc: var(--z-host)"></i>host</span>
+        <span><span class="ln"></span>inbound request</span>
+        <span><span class="ln d"></span>VM calling out</span>
+      </div>
+    </section>
+
+    <!-- ============================================================ -->
+    <section id="routes">
+      <h2><small>03</small>Route map</h2>
+      <p class="intro">Four kinds of path: public via Cloudflare, internal between containers, localhost-only on the VM, and via Tailscale. Replace <span class="var">DOMAIN</span> with your domain.</p>
+
+      <h3>Public via Cloudflare Tunnel</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>URL</th><th>Container</th><th>Who can reach it</th><th>Notes</th></tr></thead>
+        <tbody>
+          <tr><td class="u">DOMAIN</td><td>(blog, unchanged)</td><td><span class="pill p-pub">Public</span></td><td>Access's <code>*.DOMAIN</code> wildcard does not cover the root domain</td></tr>
+          <tr data-component="n8n"><td class="u">n8n.DOMAIN/</td><td class="u">n8n:5678</td><td><span class="pill p-acc">Access</span></td><td>Then the n8n login</td></tr>
+          <tr data-component="n8n"><td class="u">n8n.DOMAIN/webhook/*</td><td class="u">n8n:5678</td><td><span class="pill p-pub">Public</span></td><td>Access bypass, rate limit 100 requests / 10 s / IP</td></tr>
+          <tr data-component="n8n"><td class="u">n8n.DOMAIN/webhook-test/*</td><td class="u">n8n:5678</td><td><span class="pill p-pub">Public</span></td><td>Only while developing workflows</td></tr>
+          <tr data-component="n8n"><td class="u">n8n.DOMAIN/healthz</td><td class="u">n8n:5678</td><td><span class="pill p-pub">Public</span></td><td>Lets the service checks test the path through Cloudflare</td></tr>
+          <tr data-component="omniroute"><td class="u">ai.DOMAIN/</td><td class="u">omniroute:20128</td><td><span class="pill p-acc">Access</span></td><td>Dashboard, then the OmniRoute password</td></tr>
+          <tr data-component="omniroute"><td class="u">ai.DOMAIN/v1/*</td><td class="u">omniroute:20128</td><td><span class="pill p-acc">Service token</span></td><td>Optional, for tools on laptops. Always needs an API key too</td></tr>
+          <tr data-component="hermes"><td class="u">hermes.DOMAIN</td><td class="u">hermes:9119</td><td><span class="pill p-acc">Access admins</span></td><td>Plus basic auth or Pocket ID OIDC (group admins only)</td></tr>
+          <tr data-component="open-webui"><td class="u">chat.DOMAIN</td><td class="u">open-webui:8080</td><td><span class="pill p-acc">Access admins+members</span></td><td>Then the Pocket ID login (the local admin password is the fallback); group <code>admins</code> are its admins</td></tr>
+          <tr data-component="pocket-id"><td class="u">id.DOMAIN</td><td class="u">pocket-id:1411</td><td><span class="pill p-pub">Public</span></td><td>Access bypass because it is the IdP; protects itself with passkeys, rate-limited</td></tr>
+          <tr data-component="alloy"><td class="u">monitor.DOMAIN</td><td class="u">localhost:3000</td><td><span class="pill p-acc">Access admins</span></td><td>On the monitoring hub, through its own tunnel. Then the Grafana login or Pocket ID (admins only). No team access: monitoring is for admins</td></tr>
+          <tr data-component="homer"><td class="u">dash.DOMAIN</td><td class="u">homer:8080</td><td><span class="pill p-acc">Access admins</span></td><td>Admin launcher: a static page of links to every admin tool. ops network</td></tr>
+        </tbody>
+      </table></div>
+
+      <h3>Internal, between containers</h3>
+      <div class="tbl"><table>
+        <thead><tr><th>Address</th><th>Network</th><th>Caller</th><th>Purpose</th></tr></thead>
+        <tbody>
+          <tr data-component="omniroute"><td class="u">http://omniroute:20128/v1</td><td><span class="pill p-int">edge, backend</span></td><td>n8n, Hermes, Open WebUI</td><td>LLM calls (OpenAI-compatible) with an OmniRoute API key</td></tr>
+          <tr data-component="searxng"><td class="u">http://searxng:8080/search?q=…&amp;format=json</td><td><span class="pill p-int">backend</span></td><td>n8n, Hermes, Open WebUI</td><td>Web search (Hermes: <code>SEARXNG_URL</code> + <code>web.backend: searxng</code>)</td></tr>
+          <tr data-component="crawl4ai"><td class="u">http://crawl4ai:11235/crawl</td><td><span class="pill p-int">backend</span></td><td>n8n</td><td>Read a web page as markdown; header <code>Authorization: Bearer &lt;CRAWL4AI_API_TOKEN&gt;</code></td></tr>
+          <tr data-component="crawl4ai"><td class="u">http://crawl4ai:11235/mcp/sse</td><td><span class="pill p-int">backend</span></td><td>Hermes</td><td>Crawl4AI as an MCP tool: <code>transport: sse</code>, token from <code>MCP_CRAWL4AI_API_KEY</code> (set by <code>hermes mcp add</code>)</td></tr>
+          <tr data-component="hermes"><td class="u">http://hermes:8642/v1</td><td><span class="pill p-int">edge</span></td><td>Open WebUI, n8n</td><td>Hermes API (OpenAI-compatible, model <code>hermes-agent</code>), needs its <code>API_SERVER_KEY</code> (<code>data/hermes/.env</code>); not public</td></tr>
+          <tr data-component="open-webui"><td class="u">http://n8n:5678/mcp/…</td><td><span class="pill p-int">edge</span></td><td>Open WebUI</td><td>n8n workflows with an MCP Server Trigger, used as tools in the chat (bearer token)</td></tr>
+          <tr data-component="postgres valkey"><td class="u">postgres:5432 · valkey:6379</td><td><span class="pill p-int">data</span></td><td>n8n, Hermes, blackbox</td><td>Data and cache (full tier only; unused by default; no host port, connection strings in CUSTOMIZE)</td></tr>
+          <tr data-component="homer"><td class="u">http://homer:8080</td><td><span class="pill p-int">ops</span></td><td>cloudflared, blackbox</td><td>Hermes cannot call it: it is not on the ops network</td></tr>
+          <tr data-component="blackbox"><td class="u">http://cloudflared:2000/ready</td><td><span class="pill p-int">ops</span></td><td>blackbox</td><td>Is the tunnel connected</td></tr>
+          <tr data-component="pocket-id"><td class="u">https://id.DOMAIN/.well-known/…</td><td><span class="pill p-pub">via Cloudflare</span></td><td>Hermes dashboard, Grafana, Open WebUI</td><td>OIDC: the issuer must match APP_URL, so calls go out through Cloudflare; that is why id. must bypass Access</td></tr>
+        </tbody>
+      </table></div>
+
+      <div class="two" style="margin-top: 8px">
+        <div>
+          <h3>VM localhost only</h3>
+          <div class="tbl"><table>
+            <thead><tr><th>Port</th><th>Service</th><th>Used by</th></tr></thead>
+            <tbody>
+              <tr data-component="socket-proxy"><td class="u">127.0.0.1:2375</td><td>socket-proxy</td><td>Alloy (host network)</td></tr>
+              <tr data-component="blackbox"><td class="u">127.0.0.1:9115</td><td>blackbox</td><td>Alloy, for each service check</td></tr>
+              <tr data-component="alloy"><td class="u">127.0.0.1:12345</td><td>Alloy UI</td><td>You, through <code>ssh -L</code></td></tr>
+              <tr><td class="u">127.0.0.1:8080</td><td>CrowdSec LAPI</td><td>bouncer, <code>cscli</code></td></tr>
+            </tbody>
+          </table></div>
+        </div>
+        <div>
+          <h3>Tailscale and the Internet</h3>
+          <div class="tbl"><table>
+            <thead><tr><th>Path</th><th>Status</th></tr></thead>
+            <tbody>
+              <tr><td class="u">ssh &lt;tailscale-name&gt;</td><td><span class="pill p-acc">You only</span> SSH over the tailnet</td></tr>
+              <tr data-component="alloy"><td class="u">hub:9090 · hub:3100</td><td><span class="pill p-acc">Hosts only</span> Alloy pushes metrics and logs; containers are blocked</td></tr>
+              <tr><td class="u">Public IP :22, :80, :443</td><td><span class="pill p-none">Closed</span> empty Security List</td></tr>
+            </tbody>
+          </table></div>
+        </div>
+      </div>
+    </section>

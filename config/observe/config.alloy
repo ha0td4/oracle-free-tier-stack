@@ -1,0 +1,243 @@
+// Grafana Alloy, on every host: reads this host and pushes everything to the monitoring hub over the VCN.
+// Every series and stream gets the labels stack = STACK_NAME and host = HOST_NAME (.env): one hub serves several stacks, and
+// the dashboards filter on both, so keep these names.
+// Apply: ./stack.sh restart alloy. Its own UI (the component graph): http://127.0.0.1:12345 on this host, e.g. through ssh -L.
+
+logging {
+  level = "warn"
+}
+
+// ---- Where everything goes
+
+prometheus.remote_write "hub" {
+  endpoint {
+    url = "http://" + sys.env("OBSERVE_HUB") + ":9090/api/v1/write"
+  }
+  external_labels = { stack = sys.env("STACK_NAME"), host = sys.env("HOST_NAME") }
+}
+
+loki.write "hub" {
+  endpoint {
+    url = "http://" + sys.env("OBSERVE_HUB") + ":3100/loki/api/v1/push"
+  }
+  external_labels = { stack = sys.env("STACK_NAME"), host = sys.env("HOST_NAME") }
+}
+
+// ---- Host: CPU, RAM, swap, disks, network, load (node_exporter built in), plus the backup metric from backup.sh
+
+prometheus.exporter.unix "host" {
+  procfs_path = "/rootfs/proc"
+  sysfs_path  = "/rootfs/sys"
+  rootfs_path = "/rootfs"
+
+  // Only what the dashboards use: about 300 series per host instead of 1,000+
+  set_collectors = ["cpu", "meminfo", "filesystem", "diskstats", "netdev", "loadavg", "uname", "time", "stat", "vmstat", "pressure", "textfile"]
+
+  filesystem {
+    mount_points_exclude = "^/(dev|proc|run|sys|var/lib/docker/.+|var/lib/containers/.+)($|/)"
+    fs_types_exclude     = "^(autofs|binfmt_misc|bpf|cgroup2?|configfs|debugfs|devpts|devtmpfs|fusectl|hugetlbfs|iso9660|mqueue|nsfs|overlay|proc|procfs|pstore|rpc_pipefs|securityfs|selinuxfs|squashfs|sysfs|tracefs|tmpfs)$"
+  }
+
+  netdev {
+    device_exclude = "^(lo|veth.*|docker.*|br-.*)$"
+  }
+
+  textfile {
+    directory = "/var/lib/alloy/textfile"
+  }
+}
+
+discovery.relabel "host" {
+  targets = prometheus.exporter.unix.host.targets
+
+  rule {
+    target_label = "job"
+    replacement  = "node"
+  }
+  rule {
+    target_label = "instance"
+    replacement  = sys.env("HOST_NAME")
+  }
+}
+
+prometheus.scrape "host" {
+  targets         = discovery.relabel.host.output
+  scrape_interval = "60s"
+  forward_to      = [prometheus.remote_write.hub.receiver]
+}
+
+// ---- Containers: CPU, RAM, network, restarts (cAdvisor built in), through socket-proxy
+
+prometheus.exporter.cadvisor "containers" {
+  docker_host                  = sys.env("DOCKER_HOST")
+  docker_only                  = true
+  store_container_labels       = false
+  allowlisted_container_labels = ["com.docker.compose.service", "com.docker.compose.project"]
+  storage_duration             = "2m"
+  // Only the groups the relabel below keeps from; the rest is never collected. No "disk": cAdvisor cannot measure it under the containerd snapshotter
+  enabled_metrics              = ["cpu", "memory", "network", "oom_event"]
+}
+
+discovery.relabel "containers" {
+  targets = prometheus.exporter.cadvisor.containers.targets
+
+  rule {
+    target_label = "job"
+    replacement  = "cadvisor"
+  }
+  rule {
+    target_label = "instance"
+    replacement  = sys.env("HOST_NAME")
+  }
+}
+
+prometheus.scrape "containers" {
+  targets         = discovery.relabel.containers.output
+  scrape_interval = "60s"
+  forward_to      = [prometheus.relabel.containers.receiver]
+}
+
+// Only what the Containers dashboard uses, with short label names: container, service, project
+prometheus.relabel "containers" {
+  forward_to = [prometheus.remote_write.hub.receiver]
+
+  rule {
+    source_labels = ["__name__"]
+    regex         = "container_(cpu_usage_seconds_total|memory_working_set_bytes|memory_rss|spec_memory_limit_bytes|network_receive_bytes_total|network_transmit_bytes_total|start_time_seconds|last_seen|oom_events_total)"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["name"]
+    regex         = ".+"
+    action        = "keep"
+  }
+  rule {
+    source_labels = ["name"]
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+  rule {
+    source_labels = ["container_label_com_docker_compose_project"]
+    target_label  = "project"
+  }
+  rule {
+    regex  = "name|id|container_label_.+"
+    action = "labeldrop"
+  }
+}
+
+// ---- Service checks: data/alloy/probes.yml (from ./stack.sh; empty on a host without them), probed on 127.0.0.1:9115
+
+discovery.file "probes" {
+  files = ["/var/lib/alloy/probes.yml"]
+}
+
+discovery.relabel "probes" {
+  targets = discovery.file.probes.targets
+
+  rule {
+    source_labels = ["__address__"]
+    target_label  = "__param_target"
+  }
+  rule {
+    source_labels = ["__address__"]
+    target_label  = "target"
+  }
+  rule {
+    source_labels = ["__address__"]
+    target_label  = "instance"
+  }
+  rule {
+    source_labels = ["module"]
+    target_label  = "__param_module"
+  }
+  rule {
+    target_label = "__address__"
+    replacement  = "127.0.0.1:9115"
+  }
+  rule {
+    target_label = "job"
+    replacement  = "probe"
+  }
+}
+
+prometheus.scrape "probes" {
+  targets         = discovery.relabel.probes.output
+  metrics_path    = "/probe"
+  scrape_interval = "60s"
+  scrape_timeout  = "15s"
+  forward_to      = [prometheus.remote_write.hub.receiver]
+}
+
+// ---- Container logs, through socket-proxy
+
+discovery.docker "containers" {
+  host             = sys.env("DOCKER_HOST")
+  refresh_interval = "30s"
+}
+
+discovery.relabel "logs" {
+  targets = []
+
+  rule {
+    source_labels = ["__meta_docker_container_name"]
+    regex         = "/(.*)"
+    target_label  = "container"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+    target_label  = "service"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_label_com_docker_compose_project"]
+    target_label  = "project"
+  }
+  rule {
+    source_labels = ["__meta_docker_container_log_stream"]
+    target_label  = "stream"
+  }
+}
+
+loki.source.docker "containers" {
+  host             = sys.env("DOCKER_HOST")
+  targets          = discovery.docker.containers.targets
+  relabel_rules    = discovery.relabel.logs.rules
+  labels           = { source = "docker" }
+  refresh_interval = "30s"
+  forward_to       = [loki.process.containers.receiver]
+}
+
+// Debug lines are dropped here: they are most of the volume and rarely needed on the hub
+loki.process "containers" {
+  forward_to = [loki.write.hub.receiver]
+
+  stage.drop {
+    expression          = "(?i)(level=debug|\\[debug\\]|\"level\":\"debug\")"
+    drop_counter_reason = "debug"
+  }
+}
+
+// ---- Host journal: sshd, sudo, docker, tailscaled, the backup timer...
+
+loki.relabel "journal" {
+  forward_to = []
+
+  rule {
+    source_labels = ["__journal__systemd_unit"]
+    target_label  = "unit"
+  }
+  rule {
+    source_labels = ["__journal_priority_keyword"]
+    target_label  = "level"
+  }
+}
+
+loki.source.journal "host" {
+  max_age       = "12h"
+  relabel_rules = loki.relabel.journal.rules
+  labels        = { source = "journal" }
+  forward_to    = [loki.write.hub.receiver]
+}

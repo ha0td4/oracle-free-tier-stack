@@ -1,0 +1,33 @@
+# Add your own services without editing docker-compose.yml, so repo updates never conflict.
+# Copy to docker-compose.override.yml (gitignored): Compose merges it automatically, ./stack.sh needs no change.
+#
+# To add a component:
+#   1. Give the service a profile with the same name as the service.
+#   2. Add that name to COMPOSE_PROFILES in your tier file (tiers/<tier>.env) and, if you like, a MEM_<NAME> limit there.
+#   3. ./stack.sh up   (a ./data/<dir> bind mount is created by ./stack.sh init, or by Compose on first start)
+# To remove a component: delete its name from COMPOSE_PROFILES, then ./stack.sh tier <tier> (see CUSTOMIZE.md).
+#
+# Networks: edge = reachable by cloudflared (publish a route), backend = outbound Internet only,
+#           ops = admin tools, data = internal (no Internet).
+services:
+  whoami:                                   # example: a tiny HTTP service that echoes the request
+    image: traefik/whoami:v1.12.0           # pin an exact version, like versions.env does
+    profiles: [whoami]
+    restart: unless-stopped
+    security_opt: ["no-new-privileges:true"]
+    pids_limit: 512
+    # YAML anchors do not cross files: repeat the log rotation of docker-compose.yml
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    # Where the image allows it, also drop capabilities and the writable root (see docker-compose.yml for examples):
+    # cap_drop: [ALL]
+    # read_only: true
+    mem_limit: ${MEM_WHOAMI:-32m}
+    networks: [edge]
+    # volumes:
+    #   - ./data/whoami:/data
+
+  # Change a limit of an existing service (same name, only the keys you want to change):
+  # n8n:
+  #   mem_limit: 2g

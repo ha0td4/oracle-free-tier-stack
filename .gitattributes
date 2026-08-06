@@ -1,0 +1,2 @@
+# Keep LF in all text files (CRLF breaks the .sh scripts on Windows checkouts)
+* text=auto eol=lf

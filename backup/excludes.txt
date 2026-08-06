@@ -1,0 +1,16 @@
+# rsync excludes, relative to the stack root: caches, sockets, logs, anything rebuildable.
+# restore.sh uses them too: on the target these paths are left as they are (rsync --delete skips them).
+/.git/
+/node_modules/
+/dist/
+/data/dash/
+/data/valkey/
+# Metrics and logs are history the hub can lose; Alloy rebuilds its queue and probe list
+/data/prometheus/
+/data/loki/
+/data/alloy/
+/data/hermes/logs/
+/data/hermes/cache/
+/data/hermes/pairing/pending*
+/data/open-webui/cache/
+*.log

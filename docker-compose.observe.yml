@@ -1,0 +1,106 @@
+# Monitoring agents (project "observe"): Alloy on every host pushes to the native hub over the VCN (OBSERVE_HUB);
+# blackbox runs the service checks where the apps run. Use ./stack.sh, which also merges docker-compose.observe.attach.yml.
+name: observe
+
+x-logging: &logging
+  driver: json-file
+  options: { max-size: "10m", max-file: "3" }
+
+x-base: &base
+  restart: unless-stopped
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 512
+  logging: *logging
+
+# Nothing reads the health state but docker ps, so the check runs every 2 min (every 5 s while the container starts)
+x-healthcheck: &healthcheck
+  interval: 120s
+  timeout: 5s
+  retries: 3
+  start_period: 1m
+  start_interval: 5s
+
+services:
+  # Host network, host PID and root (read-only mounts) to read the host itself; the Docker API only through socket-proxy.
+  # containerd.sock (cAdvisor, Docker 29+) is root on the host even with :ro; Alloy alone mounts it.
+  # No healthcheck: no HTTP client in the image.
+  alloy:
+    <<: *base
+    image: grafana/alloy:${VER_ALLOY:?}
+    profiles: [alloy]
+    command: run --server.http.listen-addr=127.0.0.1:12345 --storage.path=/var/lib/alloy/data --disable-reporting /etc/alloy/config.alloy
+    user: "0:0"
+    # Default capabilities: it reads what root reads on the host (the journal, /var/lib/docker, every process in /proc)
+    network_mode: host
+    pid: host
+    cgroup: host
+    environment:
+      STACK_NAME: ${STACK_NAME:-oracle-stack}
+      HOST_NAME: ${HOST_NAME:-oracle-vm}
+      OBSERVE_HUB: ${OBSERVE_HUB:-127.0.0.1}
+      DOCKER_HOST: tcp://127.0.0.1:2375
+    volumes:
+      - ./config/observe/config.alloy:/etc/alloy/config.alloy:ro
+      # data/alloy: its queue (data/), the probe list stack.sh writes (probes.yml), the backup metric backup.sh writes (textfile/)
+      - ./data/alloy:/var/lib/alloy
+      - /:/rootfs:ro,rslave
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /run/containerd/containerd.sock:/run/containerd/containerd.sock:ro
+      - /dev/disk:/dev/disk:ro
+      - /var/log/journal:/var/log/journal:ro
+      - /run/log/journal:/run/log/journal:ro
+      - /etc/machine-id:/etc/machine-id:ro
+    depends_on: [socket-proxy]
+    mem_limit: ${MEM_ALLOY:-256m}
+
+  # Read-only Docker API for Alloy. NETWORKS: without it discovery.docker gets 403 and finds nothing.
+  # Accepted risk: any local process can read containers' environment (.env secrets) on 127.0.0.1:2375.
+  socket-proxy:
+    <<: *base
+    image: tecnativa/docker-socket-proxy:${VER_SOCKET_PROXY:?}
+    profiles: [alloy]
+    environment:
+      CONTAINERS: "1"
+      INFO: "1"
+      NETWORKS: "1"
+      POST: "0"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "127.0.0.1:2375:2375"   # for Alloy (host network)
+    # haproxy as root; docker.sock belongs to root, so no capability is needed. It writes only its config and pid file.
+    cap_drop: [ALL]
+    read_only: true
+    tmpfs: ["/run:size=1m", "/tmp:size=1m"]
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:2375/_ping"]
+      start_period: 10s
+    mem_limit: ${MEM_SOCKET_PROXY:-64m}
+    networks: [socket]
+
+  # Service checks (HTTP, keyword, TCP) of the apps on this host, by their names on the app networks (the attach file joins them).
+  # Alloy asks it for each check in data/alloy/probes.yml (written by stack.sh from the tier) and pushes the results.
+  blackbox:
+    <<: *base
+    image: prom/blackbox-exporter:${VER_BLACKBOX:?}
+    profiles: [blackbox]
+    command: --config.file=/etc/blackbox/blackbox.yml
+    volumes:
+      - ./config/observe/blackbox.yml:/etc/blackbox/blackbox.yml:ro
+    ports:
+      - "127.0.0.1:9115:9115"   # for Alloy (host network)
+    cap_drop: [ALL]             # HTTP and TCP checks only (an ICMP module would need NET_RAW)
+    read_only: true
+    healthcheck:
+      <<: *healthcheck
+      test: ["CMD", "wget", "-qO", "/dev/null", "http://127.0.0.1:9115/-/healthy"]
+      start_period: 10s
+    mem_limit: ${MEM_BLACKBOX:-32m}
+    networks: [observe]
+
+networks:
+  # Outbound Internet (blackbox to the public URLs); the app networks come from the attach file
+  observe: {}
+  socket: {}

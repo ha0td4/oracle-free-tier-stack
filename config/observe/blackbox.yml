@@ -1,0 +1,28 @@
+# blackbox_exporter: how each service check is made. Which checks run is data/alloy/probes.yml, written by ./stack.sh from the
+# tier (DEPLOY.md D9 lists them); each names one module below. Apply: ./stack.sh restart blackbox
+modules:
+  http_2xx:
+    prober: http
+    timeout: 10s
+    http:
+      preferred_ip_protocol: ip4
+  # A service that answers 401 without its token is up
+  http_2xx_401:
+    prober: http
+    timeout: 10s
+    http:
+      preferred_ip_protocol: ip4
+      valid_status_codes: [200, 401]
+  # An agent status page answers even while its gateway is stopped, so the body must say the gateway runs
+  http_gateway_running:
+    prober: http
+    timeout: 10s
+    http:
+      preferred_ip_protocol: ip4
+      fail_if_body_not_matches_regexp:
+        - '"gateway_running":\s*true'
+  tcp_connect:
+    prober: tcp
+    timeout: 5s
+    tcp:
+      preferred_ip_protocol: ip4
